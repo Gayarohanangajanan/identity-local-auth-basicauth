@@ -61,7 +61,16 @@ import org.wso2.carbon.user.core.util.UserCoreUtil;
 import org.wso2.carbon.utils.multitenancy.MultitenantUtils;
 
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.io.InputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.net.URLEncoder;
+import java.net.MalformedURLException;
+import java.net.ProtocolException;
+import java.net.URL;
+import javax.net.ssl.HttpsURLConnection;
+import java.io.DataOutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -91,6 +100,7 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
     private static final String COOKIE_NAME = "ALOR";
     private static String RE_CAPTCHA_USER_DOMAIN = "user-domain-recaptcha";
     private List<String> omittingErrorParams = null;
+    private Long eCode = 0L;
 
     /**
      * USER_EXIST_THREAD_LOCAL_PROPERTY is used to maintain the state of user existence
@@ -102,9 +112,10 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
     public boolean canHandle(HttpServletRequest request) {
         String userName = request.getParameter(BasicAuthenticatorConstants.USER_NAME);
         String password = request.getParameter(BasicAuthenticatorConstants.PASSWORD);
+        String typingPattern = request.getParameter("typingPattern");
         Cookie autoLoginCookie = getAutoLoginCookie(request.getCookies());
 
-        return (userName != null && password != null) || autoLoginCookie != null;
+        return (userName != null && password != null && typingPattern != null ) || autoLoginCookie != null;
     }
 
     @Override
@@ -404,17 +415,27 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
                 if (log.isDebugEnabled()) {
                     log.debug("Identity error message context is null");
                 }
-                redirectURL = loginPage + ("?" + queryParams)
-                        + BasicAuthenticatorConstants.AUTHENTICATORS + getName() + ":" +
-                        BasicAuthenticatorConstants.LOCAL + retryParam;
+                if (eCode.equals(10L)) {
+                    redirectURL = loginPage + ("?" + queryParams)
+                            + BasicAuthenticatorConstants.AUTHENTICATORS + getName() + ":" +
+                            BasicAuthenticatorConstants.LOCAL + "&authFailure=true&authFailureMsg=typingPattern.enroll.message";
+                } else if (eCode.equals(9L)) {
+                    redirectURL = loginPage + ("?" + queryParams)
+                            + BasicAuthenticatorConstants.AUTHENTICATORS + getName() + ":" +
+                            BasicAuthenticatorConstants.LOCAL + "&authFailure=true&authFailureMsg=typingPattern.verification.fail.message";
+                } else {
+                    redirectURL = loginPage + ("?" + queryParams)
+                            + BasicAuthenticatorConstants.AUTHENTICATORS + getName() + ":" +
+                            BasicAuthenticatorConstants.LOCAL + retryParam;
+                }
+                eCode = 0L;
             }
-
             redirectURL += getCaptchaParams(context.getTenantDomain());
             response.sendRedirect(redirectURL);
-        } catch (IOException e) {
-            throw new AuthenticationFailedException(ErrorMessages.SYSTEM_ERROR_WHILE_AUTHENTICATING.getCode(),
-                    e.getMessage(),
-                    User.getUserFromUserName(request.getParameter(BasicAuthenticatorConstants.USER_NAME)), e);
+
+        }
+        catch (IOException e) {
+            throw new AuthenticationFailedException(ErrorMessages.SYSTEM_ERROR_WHILE_AUTHENTICATING.getCode(), e.getMessage(), User.getUserFromUserName(request.getParameter(BasicAuthenticatorConstants.USER_NAME)), e);
         }
     }
 
@@ -451,6 +472,8 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
         authProperties.put(PASSWORD_PROPERTY, password);
 
         boolean isAuthenticated;
+        boolean result = true;
+        eCode = 0L;
         UserStoreManager userStoreManager = getUserStoreManager(username);
         // Reset RE_CAPTCHA_USER_DOMAIN thread local variable before the authentication
         IdentityUtil.threadLocalProperties.get().remove(RE_CAPTCHA_USER_DOMAIN);
@@ -462,6 +485,61 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
             if (isAuthPolicyAccountExistCheck()) {
                 checkUserExistence();
             }
+            if (isAuthenticated){
+                try {
+                    String baseurl = "https://api.typingdna.com/auto/"+username+"@typingdna";
+                    String typingPattern = request.getParameter("typingPattern");
+                    String data = "tp=" + URLEncoder.encode(typingPattern, "UTF-8");
+                    URL url = new URL(baseurl);
+                    HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
+                    connection.setRequestMethod("POST");
+                    connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+                    connection.setRequestProperty("Authorization", "Basic MWU0ZmY3ODQxY2U0MjY2NzhiOGFiNDVmZTVlMTNiY2M6N2NhYjVmMDg1YTEzYWVmM2FiZmJiMDQ1MmE2ZjQxOGM=");
+
+                    connection.setUseCaches(false);
+                    connection.setDoOutput(true);
+
+                    DataOutputStream wr = new DataOutputStream(connection.getOutputStream());
+                    wr.writeBytes(data);
+                    wr.close();
+
+                    InputStream is = connection.getInputStream();
+                    BufferedReader rd = new BufferedReader(new InputStreamReader(is));
+                    StringBuilder res = new StringBuilder();
+                    String line;
+                    while ((line = rd.readLine()) != null) {
+                        res.append(line);
+                        res.append('\r');
+                    }
+                    rd.close();
+                    log.info(res.toString());
+                    JSONParser parser = new JSONParser();
+                    JSONObject jobj = (JSONObject) parser.parse(res.toString());
+                    Long typingResult = (Long) jobj.get("result");
+                    eCode = (Long) jobj.get("message_code");
+                    if (!eCode.equals(10L)){
+                        result = typingResult.equals(0L);//not verified
+                        if (result){
+                            eCode = 9L;
+                        }
+                    }
+
+                } catch (MalformedURLException e){
+                    e.printStackTrace();
+                } catch (UnsupportedEncodingException e) {
+                    e.printStackTrace();
+                } catch (ProtocolException e) {
+                    e.printStackTrace();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                } catch (ParseException e) {
+                    e.printStackTrace();
+                }
+                if (result){
+                    throw new AuthenticationFailedException("Typing pattern enrolled");
+                }
+            }
+
         } catch (org.wso2.carbon.user.api.UserStoreException e) {
             if (log.isDebugEnabled()) {
                 log.debug("BasicAuthentication failed while trying to authenticate the user " + username, e);
