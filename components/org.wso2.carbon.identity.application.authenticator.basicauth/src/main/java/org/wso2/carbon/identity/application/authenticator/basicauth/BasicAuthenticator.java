@@ -494,7 +494,7 @@ public class BasicAuthenticator extends AbstractApplicationAuthenticator
                     HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
                     connection.setRequestMethod("POST");
                     connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-                    connection.setRequestProperty("Authorization", "Basic MWU0ZmY3ODQxY2U0MjY2NzhiOGFiNDVmZTVlMTNiY2M6N2NhYjVmMDg1YTEzYWVmM2FiZmJiMDQ1MmE2ZjQxOGM=");
+                    connection.setRequestProperty("Authorization", "Basic [base64encooded value of key+secret]");
 
                     connection.setUseCaches(false);
                     connection.setDoOutput(true);
